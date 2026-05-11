@@ -1,0 +1,10 @@
+# user-created secrets
+assets/.env
+
+# generated test fixtures (re-rendered on every run of step4/step5 scripts)
+assets/step4_tmp/
+assets/step5_tmp/
+
+# python build artifacts
+__pycache__/
+*.pyc
