@@ -5,6 +5,12 @@ assets/.env
 assets/step4_tmp/
 assets/step5_tmp/
 
+# PDF synthesis previews (poc / wrap demos) — regeneratable
+assets/pdf_tmp/
+
+# C4c failure diagnostic artifacts — regenerated on each measurement run
+assets/golden/fail_artifacts/
+
 # python build artifacts
 __pycache__/
 *.pyc

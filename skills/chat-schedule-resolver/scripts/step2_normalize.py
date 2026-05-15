@@ -6,17 +6,22 @@ Pipeline contract:
         "participants": [str],
         "items": [
             {
-                "participant": str,
-                "polarity": "prefer" | "exclude",
-                "time_expr_raw": str,
+                "who": str,
+                "type": "prefer" | "exclude",
+                "time": str,                       # raw Korean phrase
                 "start": ISO-8601 datetime str,   # inclusive
                 "end":   ISO-8601 datetime str,   # exclusive
                 "certainty": float in [0, 1],
-                "source_msg_id": int (1-based line index in conversation),
+                "evidence_msg_id": int (1-based line index in conversation),
             },
             ...
         ],
     }
+
+Field names match the SKILL.md public contract (`extracted_preferences`).
+`start`/`end`/`certainty` are kept here as internal fields for the
+intersection/ranking steps; only the 5 contract fields are surfaced in the
+final `extracted_preferences` output.
 
 Design choices (driven by Step 1 흠결):
   * Multi-day expressions ("다음주 점심쯤") are expanded into one item per
@@ -24,8 +29,8 @@ Design choices (driven by Step 1 흠결):
     spec forbids array-of-array, and the downstream calendar-intersection
     code is simpler when every item is a single half-open interval.
   * 24:00 is normalized to next-day 00:00 (half-open intervals).
-  * source_msg_id is the 1-based line number in the conversation text so
-    Step 3 (groundedness) can quote the exact utterance.
+  * evidence_msg_id is the 1-based line number in the conversation text so
+    Step 3 (evidence verification) can quote the exact utterance.
 
 We try Information Extract first (per SKILL.md). If the server rejects
 text-wrapped-as-document, we transparently fall back to Solar Pro 3
@@ -38,8 +43,6 @@ import json
 import sys
 import textwrap
 from typing import Any
-
-import requests
 
 from upstage_client import UpstageClient
 
@@ -68,16 +71,16 @@ SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "participant": {
+                    "who": {
                         "type": "string",
                         "description": "Speaker name as it appears in the conversation."
                     },
-                    "polarity": {
+                    "type": {
                         "type": "string",
                         "description": "'prefer' if the speaker wants this slot, 'exclude' if they ruled it out.",
                         "enum": ["prefer", "exclude"],
                     },
-                    "time_expr_raw": {
+                    "time": {
                         "type": "string",
                         "description": "Original Korean phrase, verbatim, e.g. '이번주 늦게'.",
                     },
@@ -106,7 +109,7 @@ SCHEMA: dict[str, Any] = {
                             "'금요일 저녁 8시'."
                         ),
                     },
-                    "source_msg_id": {
+                    "evidence_msg_id": {
                         "type": "integer",
                         "description": (
                             "1-based line number in the conversation where this "
@@ -115,13 +118,13 @@ SCHEMA: dict[str, Any] = {
                     },
                 },
                 "required": [
-                    "participant",
-                    "polarity",
-                    "time_expr_raw",
+                    "who",
+                    "type",
+                    "time",
                     "start",
                     "end",
                     "certainty",
-                    "source_msg_id",
+                    "evidence_msg_id",
                 ],
                 "additionalProperties": False,
             },
@@ -148,8 +151,8 @@ SYSTEM_PROMPT_TEMPLATE = """\
 2. 다중 일자 표현은 (날짜 × 시간대) 단위로 분해합니다. 절대 여러 날을 하나의 긴 구간으로 묶지 마세요. (이 스키마는 single contiguous interval만 허용합니다.)
 3. start/end는 ISO 8601 로컬 시간 'YYYY-MM-DDTHH:MM' (타임존 없음), half-open 구간(end 미포함). '24:00' 금지 — 다음날 '00:00' 사용.
 4. 종일 표현은 해당 일 00:00 ~ 다음 일 00:00.
-5. polarity는 'prefer' 또는 'exclude' 둘 중 하나.
-6. source_msg_id = (A)의 1-기반 줄 번호.
+5. type은 'prefer' 또는 'exclude' 둘 중 하나.
+6. evidence_msg_id = (A)의 1-기반 줄 번호.
 7. 시간 언급 없는 참가자는 items에서 빠지지만 participants 배열에는 포함합니다.
 
 정량화 규칙:
@@ -212,31 +215,28 @@ def normalize(
     step1_output: str,
     reference_date: str,
 ) -> tuple[dict[str, Any], str]:
-    """Return (parsed_result, backend_used). Backend is 'ie' or 'chat_fallback'."""
+    """Return (parsed_result, backend_used).
+
+    Backend is always ``'chat_fallback'`` in v1: the Solar-only Step 2
+    path goes straight to Solar Pro 3's structured-output endpoint. The
+    chat-text → IE route is intentionally skipped because the IE endpoint
+    rejects every text MIME (HTTP 400 "Unsupported media type") — see
+    SKILL.md §6.1. The IE-mode pipeline reaches IE through synthesised
+    PDFs in ``extract_via_ie``, not through Step 2.
+
+    The ``backend_used`` return value is kept for backward compatibility
+    with callers that log it; future versions may drop the tuple.
+    """
 
     system = SYSTEM_PROMPT_TEMPLATE.format(reference_date=reference_date)
     user = build_user_message(conversation_text, step1_output)
-
-    # IE expects a document; we wrap the combined text as a synthetic
-    # text/plain "document" and pass the system instructions as the schema's
-    # field descriptions + an inline preface in the user content.
-    ie_input = f"{system}\n\n{user}"
-    try:
-        result = client.extract(ie_input, SCHEMA)
-        return result, "ie"
-    except requests.HTTPError as e:
-        # IE may reject text-as-document. Fall back to Solar structured output.
-        sys.stderr.write(
-            f"[step2] IE rejected text input ({e.response.status_code}); "
-            f"falling back to Solar structured output.\n"
-        )
-        result = client.structured_chat(
-            system=system,
-            user=user,
-            schema=SCHEMA,
-            schema_name="chat_schedule_extraction",
-        )
-        return result, "chat_fallback"
+    result = client.structured_chat(
+        system=system,
+        user=user,
+        schema=SCHEMA,
+        schema_name="chat_schedule_extraction",
+    )
+    return result, "chat_fallback"
 
 
 # ---- self-test -------------------------------------------------------------
@@ -296,18 +296,18 @@ def _validate(result: dict[str, Any], case: dict) -> list[str]:
         )
     for idx, it in enumerate(items):
         for k in (
-            "participant",
-            "polarity",
-            "time_expr_raw",
+            "who",
+            "type",
+            "time",
             "start",
             "end",
             "certainty",
-            "source_msg_id",
+            "evidence_msg_id",
         ):
             if k not in it:
                 failures.append(f"item[{idx}] missing key {k}")
-        if it.get("polarity") not in ("prefer", "exclude"):
-            failures.append(f"item[{idx}] bad polarity: {it.get('polarity')!r}")
+        if it.get("type") not in ("prefer", "exclude"):
+            failures.append(f"item[{idx}] bad type: {it.get('type')!r}")
         # half-open interval sanity: end > start as strings (ISO local sorts lexically)
         if it.get("start") and it.get("end") and not (it["end"] > it["start"]):
             failures.append(

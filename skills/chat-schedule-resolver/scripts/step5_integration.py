@@ -5,10 +5,10 @@ Two passes over the same golden scenario:
     B. Image input: render the same conversation as a synthetic KakaoTalk
        screenshot, run it through OCR + reformat + the full pipeline.
 
-Both passes must converge on the same set of grounded (participant,
-time_expr_raw) pairs. Date/time intervals are compared loosely (per
-participant set, not exact ISO equality) because the multi-day expansion
-isn't fully deterministic across runs.
+Both passes must converge on the same set of grounded (who, time) pairs.
+Date/time intervals are compared loosely (per participant set, not exact
+ISO equality) because the multi-day expansion isn't fully deterministic
+across runs.
 
 This isn't a single-shot CI gate -- it makes ~14 API calls per run (Step 4
 OCR + reformat, then Steps 1-3 twice over). Use it as a smoke check after
@@ -51,7 +51,7 @@ EXPECT_PHRASE_SUBSTR = {
     "준호": "금요일 저녁",
     "지수": "토요일",
 }
-EXPECT_POLARITY = {
+EXPECT_TYPE = {
     "민지": "prefer",
     "준호": "prefer",
     "지수": "exclude",
@@ -59,15 +59,15 @@ EXPECT_POLARITY = {
 
 
 def _summarize_grounded(grounded: list[dict]) -> dict[str, dict]:
-    """Collapse multi-day-expanded rows to {participant: {phrase, polarity, row_count}}."""
+    """Collapse multi-day-expanded rows to {who: {time, type, row_count}}."""
     by_part: dict[str, dict] = {}
     for it in grounded:
-        p = it["participant"]
+        p = it["who"]
         agg = by_part.setdefault(
             p,
             {
-                "time_expr_raw": it["time_expr_raw"],
-                "polarity": it["polarity"],
+                "time": it["time"],
+                "type": it["type"],
                 "row_count": 0,
                 "starts": [],
             },
@@ -90,8 +90,8 @@ def _check_pass(label: str, result: dict) -> bool:
     if unresolved:
         for u in unresolved:
             print(
-                f"   * {u['participant']} '{u['time_expr_raw']}' "
-                f"verdict={u['gc_verdict']} reason={u['gc_reason']}"
+                f"   * {u['who']} '{u['time']}' "
+                f"verified={u['grounded']} reason={u['reason']}"
             )
 
     failures: list[str] = []
@@ -103,15 +103,15 @@ def _check_pass(label: str, result: dict) -> bool:
     if extra:
         failures.append(f"unexpected speakers in grounded: {extra}")
     for p, want_sub in EXPECT_PHRASE_SUBSTR.items():
-        got = summary.get(p, {}).get("time_expr_raw", "")
+        got = summary.get(p, {}).get("time", "")
         if want_sub not in got:
             failures.append(
                 f"{p}: expected phrase containing {want_sub!r}, got {got!r}"
             )
-    for p, want_pol in EXPECT_POLARITY.items():
-        got = summary.get(p, {}).get("polarity")
-        if got != want_pol:
-            failures.append(f"{p}: expected polarity {want_pol}, got {got}")
+    for p, want_type in EXPECT_TYPE.items():
+        got = summary.get(p, {}).get("type")
+        if got != want_type:
+            failures.append(f"{p}: expected type {want_type}, got {got}")
     if unresolved:
         failures.append(
             f"{len(unresolved)} unresolved rows (golden case should be 100% grounded)"
@@ -127,8 +127,8 @@ def _check_pass(label: str, result: dict) -> bool:
 
 
 def _convergence_check(text_result: dict, image_result: dict) -> bool:
-    """Both modes must produce the same (participant, polarity) set
-    and substring-matching phrases."""
+    """Both modes must produce the same (who, type) set and substring-
+    matching phrases."""
     t_sum = _summarize_grounded(text_result["step3_result"]["grounded"])
     i_sum = _summarize_grounded(image_result["step3_result"]["grounded"])
     failures = []
@@ -137,13 +137,13 @@ def _convergence_check(text_result: dict, image_result: dict) -> bool:
             f"participant sets differ: text={set(t_sum)}, image={set(i_sum)}"
         )
     for p in set(t_sum) & set(i_sum):
-        if t_sum[p]["polarity"] != i_sum[p]["polarity"]:
+        if t_sum[p]["type"] != i_sum[p]["type"]:
             failures.append(
-                f"{p}: polarity differs (text={t_sum[p]['polarity']}, "
-                f"image={i_sum[p]['polarity']})"
+                f"{p}: type differs (text={t_sum[p]['type']}, "
+                f"image={i_sum[p]['type']})"
             )
         # phrase substring overlap is sufficient (OCR may add a space, etc.)
-        tp, ip = t_sum[p]["time_expr_raw"], i_sum[p]["time_expr_raw"]
+        tp, ip = t_sum[p]["time"], i_sum[p]["time"]
         norm = lambda s: "".join(s.split())
         if norm(tp) not in norm(ip) and norm(ip) not in norm(tp):
             failures.append(
@@ -154,7 +154,7 @@ def _convergence_check(text_result: dict, image_result: dict) -> bool:
         for f in failures:
             print(f"  - {f}")
         return False
-    print("[CONVERGENCE OK] text and image modes agree on participants/polarity/phrases")
+    print("[CONVERGENCE OK] text and image modes agree on participants/type/phrases")
     return True
 
 
@@ -181,7 +181,7 @@ def main() -> int:
     render_kakao_screenshot(img_path, title="동기 모임", bubbles=BUBBLES)
     image_result = run(
         reference_date=REFERENCE_DATE,
-        image_path=img_path,
+        image_paths=[img_path],
         client=client,
     )
     b_ok = _check_pass("image", image_result)

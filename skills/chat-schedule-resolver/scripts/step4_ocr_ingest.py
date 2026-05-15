@@ -10,7 +10,7 @@ Pipeline contract:
     in : (image_path, reference_date)
     out: {
         "chat_lines":  "발화자: 메시지\\n..."  # ready for Step 1
-        "messages":    [{participant, content, ts_raw?}, ...]
+        "messages":    [{user, text, ts}, ...]  # matches docx input schema
         "ocr_raw":     str  # the OCR text we started from (kept for debug)
     }
 """
@@ -41,9 +41,9 @@ REFORMAT_SYSTEM = """\
 당신의 일:
 - 메시지 한 건당 하나의 message 객체를 만듭니다.
 - 같은 발화자가 연속해서 보낸 여러 줄은 별개 메시지로 분리합니다.
-- participant는 발화자 이름. 직전 그룹의 이름을 끌어내려 보강합니다 (OCR이 매번 이름을 잡지 못해도).
-- content는 메시지 본문만. 타임스탬프나 '읽음' 같은 UI 텍스트는 절대 포함하지 않습니다.
-- ts_raw는 메시지 옆에 보이는 시각 문자열을 그대로(예: '오후 8:32'). 없으면 빈 문자열.
+- user는 발화자 이름. 직전 그룹의 이름을 끌어내려 보강합니다 (OCR이 매번 이름을 잡지 못해도).
+- text는 메시지 본문만. 타임스탬프나 '읽음' 같은 UI 텍스트는 절대 포함하지 않습니다.
+- ts는 메시지 옆에 보이는 시각 문자열을 그대로(예: '오후 8:32'). 없으면 빈 문자열.
 - 메시지가 아닌 텍스트(날짜 헤더, '읽음 N', '입장하셨습니다' 등 시스템 메시지)는 messages에서 제외합니다.
 
 응답은 스키마에 정확히 맞는 JSON 객체만 반환합니다.
@@ -59,20 +59,20 @@ REFORMAT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "participant": {
+                    "user": {
                         "type": "string",
                         "description": "Speaker name as displayed in the chat header.",
                     },
-                    "content": {
+                    "text": {
                         "type": "string",
                         "description": "Message body only — no timestamp, no UI text.",
                     },
-                    "ts_raw": {
+                    "ts": {
                         "type": "string",
                         "description": "Timestamp string next to the message, e.g. '오후 8:32'. Empty if absent.",
                     },
                 },
-                "required": ["participant", "content", "ts_raw"],
+                "required": ["user", "text", "ts"],
                 "additionalProperties": False,
             },
         }
@@ -124,7 +124,7 @@ def ingest_kakao_image(
     structured = reformat_ocr_to_chat(client, raw)
     messages = structured.get("messages", [])
     chat_lines = "\n".join(
-        f"{m['participant']}: {m['content']}".strip() for m in messages
+        f"{m['user']}: {m['text']}".strip() for m in messages
     )
     return {
         "chat_lines": chat_lines,
@@ -151,7 +151,7 @@ def render_kakao_screenshot(
     out_path: Path,
     *,
     title: str,
-    bubbles: list[tuple[str, str, str]],  # (participant, content, ts_raw)
+    bubbles: list[tuple[str, str, str]],  # (user, text, ts)
 ) -> Path:
     """Render a minimal-but-realistic KakaoTalk-style screenshot for OCR tests.
 
@@ -207,17 +207,17 @@ def render_kakao_screenshot(
 
     # Bubbles (all left-aligned to avoid right-vs-left layout complexity for OCR
     # — the model still has to recover speakers from labels).
-    for participant, content, ts in bubbles:
-        draw.text((pad_x, y), participant, fill="#222222", font=f_name)
+    for user, text, ts in bubbles:
+        draw.text((pad_x, y), user, fill="#222222", font=f_name)
         y += 28
         # measure
-        text_w = draw.textlength(content, font=f_msg)
+        text_w = draw.textlength(text, font=f_msg)
         bubble_w = int(text_w) + 2 * bubble_pad
         bubble_h = 30 + 2 * bubble_pad
         bx0, by0 = pad_x, y
         bx1, by1 = pad_x + bubble_w, y + bubble_h
         draw.rounded_rectangle((bx0, by0, bx1, by1), radius=14, fill="white")
-        draw.text((bx0 + bubble_pad, by0 + bubble_pad - 2), content, fill="#000", font=f_msg)
+        draw.text((bx0 + bubble_pad, by0 + bubble_pad - 2), text, fill="#000", font=f_msg)
         if ts:
             draw.text((bx1 + 8, by1 - 22), ts, fill="#555", font=f_ts)
         y += bubble_h + line_gap
@@ -285,17 +285,17 @@ def _run_case(client: UpstageClient, case: dict, tmpdir: Path) -> bool:
     print(json.dumps(result["messages"], ensure_ascii=False, indent=2))
 
     failures = []
-    speakers = {m["participant"] for m in result["messages"]}
+    speakers = {m["user"] for m in result["messages"]}
     missing = case["expect_participants"] - speakers
     if missing:
         failures.append(f"missing speakers: {missing}")
     for phrase in case["expect_phrases"]:
         if phrase not in result["chat_lines"]:
             failures.append(f"missing phrase: {phrase!r}")
-    # No UI cruft should leak into content
+    # No UI cruft should leak into text
     for m in result["messages"]:
-        if any(tok in m["content"] for tok in ("읽음", "오후 ", "오전 ")):
-            failures.append(f"UI cruft in content: {m['content']!r}")
+        if any(tok in m["text"] for tok in ("읽음", "오후 ", "오전 ")):
+            failures.append(f"UI cruft in text: {m['text']!r}")
 
     if failures:
         print("[FAIL]")
