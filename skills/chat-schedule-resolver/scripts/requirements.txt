@@ -1,6 +1,4 @@
 requests
-pydantic
-python-dotenv
 reportlab
 pypdf
 Pillow
